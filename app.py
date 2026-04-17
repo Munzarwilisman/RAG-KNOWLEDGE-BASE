@@ -30,67 +30,113 @@ from pathlib import Path
 from io import BytesIO
 from typing import Optional, Literal
 
-# ── Konfigurasi ───────────────────────────────────────────────────────────────
-_INDEX_DIR     = Path("rag_index")
-_INDEX_DIR.mkdir(exist_ok=True)
 
-_CHUNK_SIZE    = 1400   # besar agar 1 tabel parameter muat dalam 1 chunk
-_CHUNK_OVERLAP = 350
-_TOP_K         = 10     # ambil lebih banyak chunk
-_EMBED_MODEL   = "paraphrase-multilingual-MiniLM-L12-v2"
-_IMG_THRESHOLD = 150    # karakter minimum teks; di bawah → Vision OCR
-_OCR_DPI       = 150
+# ══════════════════════════════════════════════════════════════════════════════
+# SUPABASE STORAGE — Persistensi index di Streamlit Cloud
+# ══════════════════════════════════════════════════════════════════════════════
 
-# OCR Engine options
-OCR_ENGINE_CLAUDE   = "Claude Vision"
-OCR_ENGINE_CHANDRA_HF  = "Chandra OCR (Lokal/HF)"
-OCR_ENGINE_CHANDRA_API = "Chandra OCR (Datalab API)"
+_SUPABASE_BUCKET   = "rag-index"
+_SUPABASE_INDEX_FILES = ["chunks.pkl", "faiss.index", "doc_meta.json"]
 
-_OCR_ENGINE_OPTIONS = [
-    OCR_ENGINE_CLAUDE,
-    OCR_ENGINE_CHANDRA_HF,
-    OCR_ENGINE_CHANDRA_API,
-]
 
-_DOC_CATEGORIES = [
-    "Boiler CFB","Steam Turbine","Generator","Kondenser & BOP",
-    "Instrumen & Kontrol","Sistem Bahan Bakar","Sistem Air & Kimia",
-    "SOP Operasi","Maintenance","Keselamatan (K3)","Standar EPRI / ASME","Lain-lain",
-]
+def _get_supabase_client():
+    """Buat Supabase client dari secrets."""
+    try:
+        import streamlit as _st
+        from supabase import create_client
+        url = _st.secrets["supabase"]["url"]
+        key = _st.secrets["supabase"]["key"]
+        return create_client(url, key)
+    except Exception:
+        return None
 
-# CSS untuk dipakai dalam run_rag_app() — TIDAK dieksekusi saat di-import
-_CSS = """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
-*{font-family:'Inter',sans-serif!important}
-.stApp{background:linear-gradient(135deg,#0a0f1e,#111827,#0d1117);color:#e2e8f0}
-section[data-testid="stSidebar"]{background:linear-gradient(180deg,#0f172a,#1e293b)!important;border-right:1px solid rgba(99,102,241,.2)}
-h1{font-size:1.8rem!important;font-weight:800!important;background:linear-gradient(90deg,#6366f1,#a78bfa,#38bdf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-h2{font-size:1.3rem!important;font-weight:700!important;color:#c7d2fe!important}
-h3{font-size:1.1rem!important;font-weight:600!important;color:#a5b4fc!important}
-.stButton>button{background:linear-gradient(135deg,#4f46e5,#7c3aed)!important;color:#fff!important;font-weight:600!important;border:none!important;border-radius:10px!important;padding:10px 22px!important;box-shadow:0 4px 15px rgba(79,70,229,.35)!important}
-.stButton>button:hover{transform:translateY(-2px)!important}
-.stTextInput>div>div>input,.stTextArea>div>div>textarea,.stSelectbox>div>div{background:rgba(30,41,59,.8)!important;color:#e2e8f0!important;border:1px solid rgba(99,102,241,.3)!important;border-radius:10px!important}
-.stTabs [data-baseweb="tab-list"]{background:rgba(15,23,42,.8);border-radius:12px;padding:4px;border:1px solid rgba(99,102,241,.2)}
-.stTabs [data-baseweb="tab"]{border-radius:9px!important;font-weight:600!important;font-size:.83rem!important;color:#94a3b8!important}
-.stTabs [aria-selected="true"]{background:linear-gradient(135deg,#4f46e5,#7c3aed)!important;color:#fff!important}
-::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:#0f172a}::-webkit-scrollbar-thumb{background:rgba(99,102,241,.4);border-radius:3px}
-.doc-card{background:linear-gradient(135deg,rgba(30,41,59,.9),rgba(15,23,42,.9));border:1px solid rgba(99,102,241,.25);border-radius:12px;padding:14px 18px;margin:6px 0}
-.chunk-card{background:rgba(30,41,59,.6);border:1px solid rgba(99,102,241,.2);border-left:3px solid #6366f1;border-radius:8px;padding:12px 16px;margin:8px 0;font-size:.88rem}
-.answer-box{background:linear-gradient(135deg,rgba(30,41,59,.95),rgba(15,23,42,.95));border:1px solid rgba(99,102,241,.3);border-left:4px solid #6366f1;border-radius:14px;padding:20px 24px;margin:12px 0;line-height:1.75;font-size:.95rem}
-.source-badge{display:inline-block;background:rgba(99,102,241,.15);border:1px solid rgba(99,102,241,.35);border-radius:20px;padding:3px 12px;font-size:.76rem;color:#a5b4fc;margin:3px 4px 3px 0}
-.vision-badge{display:inline-block;background:rgba(168,85,247,.15);border:1px solid rgba(168,85,247,.4);border-radius:20px;padding:3px 10px;font-size:.75rem;color:#c4b5fd;margin-left:4px}
-.chandra-badge{display:inline-block;background:rgba(236,72,153,.12);border:1px solid rgba(236,72,153,.4);border-radius:20px;padding:3px 10px;font-size:.75rem;color:#f9a8d4;margin-left:4px}
-.text-badge{display:inline-block;background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.35);border-radius:20px;padding:3px 10px;font-size:.75rem;color:#6ee7b7;margin-left:4px}
-.engine-card{border-radius:12px;padding:14px 16px;margin-bottom:10px;}
-.engine-claude{background:linear-gradient(135deg,rgba(99,102,241,.12),rgba(139,92,246,.08));border:1px solid rgba(99,102,241,.3);}
-.engine-chandra{background:linear-gradient(135deg,rgba(236,72,153,.10),rgba(244,63,94,.07));border:1px solid rgba(236,72,153,.3);}
-.stat-card{background:linear-gradient(135deg,rgba(30,41,59,.9),rgba(15,23,42,.9));border:1px solid rgba(99,102,241,.25);border-radius:12px;padding:14px 18px;text-align:center;margin:4px 0}
-.stat-val{font-size:1.6em;font-weight:800;color:#818cf8}
-.stat-lbl{font-size:.75rem;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:.8px}
-.progress-log{background:rgba(15,23,42,.9);border:1px solid rgba(99,102,241,.2);border-radius:10px;padding:12px 16px;font-size:.82rem;color:#94a3b8;font-family:monospace;max-height:180px;overflow-y:auto}
-</style>
-"""
+
+def _ensure_bucket(client) -> bool:
+    """Pastikan bucket ada, buat jika belum."""
+    try:
+        buckets = [b.name for b in client.storage.list_buckets()]
+        if _SUPABASE_BUCKET not in buckets:
+            client.storage.create_bucket(
+                _SUPABASE_BUCKET,
+                options={"public": False}
+            )
+        return True
+    except Exception:
+        return False
+
+
+def supabase_pull_index(index_dir: Path) -> tuple[bool, str]:
+    """
+    Download semua file index dari Supabase Storage ke lokal.
+    Return: (success, message)
+    """
+    client = _get_supabase_client()
+    if not client:
+        return False, "Supabase tidak dikonfigurasi"
+
+    _ensure_bucket(client)
+    downloaded = []
+
+    for fname in _SUPABASE_INDEX_FILES:
+        try:
+            data = client.storage.from_(_SUPABASE_BUCKET).download(fname)
+            if data:
+                local_path = index_dir / fname
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(local_path, "wb") as f:
+                    f.write(data)
+                downloaded.append(fname)
+        except Exception:
+            continue  # file belum ada di bucket (pertama kali)
+
+    if not downloaded:
+        return False, "Index belum ada di Supabase (pertama kali pakai)"
+    return True, f"✅ Berhasil pull: {', '.join(downloaded)}"
+
+
+def supabase_push_index(index_dir: Path) -> tuple[bool, str]:
+    """
+    Upload semua file index dari lokal ke Supabase Storage.
+    Return: (success, message)
+    """
+    client = _get_supabase_client()
+    if not client:
+        return False, "Supabase tidak dikonfigurasi"
+
+    _ensure_bucket(client)
+    uploaded = []
+
+    for fname in _SUPABASE_INDEX_FILES:
+        fpath = index_dir / fname
+        if not fpath.exists():
+            continue
+        try:
+            with open(fpath, "rb") as f:
+                file_bytes = f.read()
+            # upsert = update jika sudah ada, insert jika belum
+            client.storage.from_(_SUPABASE_BUCKET).upload(
+                path=fname,
+                file=file_bytes,
+                file_options={"upsert": "true"},
+            )
+            uploaded.append(fname)
+        except Exception as e:
+            continue
+
+    if not uploaded:
+        return False, "Tidak ada file index untuk di-upload"
+    return True, f"✅ Berhasil push: {', '.join(uploaded)}"
+
+
+def is_supabase_configured() -> bool:
+    """Cek apakah Supabase sudah dikonfigurasi di secrets."""
+    try:
+        import streamlit as _st
+        return ("supabase" in _st.secrets and
+                "url" in _st.secrets["supabase"] and
+                "key" in _st.secrets["supabase"])
+    except Exception:
+        return False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -589,6 +635,11 @@ class RAGEngine:
         self._faiss_index = None
         self._chunks: list[dict] = []
         self._doc_meta: dict     = {}
+        # Pull index dari Supabase jika dikonfigurasi dan index lokal kosong
+        if is_supabase_configured():
+            local_ok = (self.index_dir / "chunks.pkl").exists()
+            if not local_ok:
+                supabase_pull_index(self.index_dir)
         self._load_index()
 
     @property
@@ -601,7 +652,7 @@ class RAGEngine:
                 return None
         return self._embed_model
 
-    def _save(self):
+    def _save(self, push_to_supabase: bool = True):
         import faiss
         with open(self.index_dir / "chunks.pkl", "wb") as f:
             pickle.dump(self._chunks, f)
@@ -609,6 +660,9 @@ class RAGEngine:
             json.dump(self._doc_meta, f, ensure_ascii=False, indent=2)
         if self._faiss_index is not None:
             faiss.write_index(self._faiss_index, str(self.index_dir / "faiss.index"))
+        # Auto-push ke Supabase jika dikonfigurasi
+        if push_to_supabase and is_supabase_configured():
+            supabase_push_index(self.index_dir)
 
     def _load_index(self):
         try:
@@ -1003,441 +1057,320 @@ ATURAN FORMAT TABEL PARAMETER:
 # STREAMLIT APP
 # ══════════════════════════════════════════════════════════════════════════════
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STREAMLIT UI
+# ══════════════════════════════════════════════════════════════════════════════
+
+_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+* { font-family: 'Inter', sans-serif !important; }
+.stApp { background: linear-gradient(135deg,#0a0f1e,#111827,#0d1117); color: #e2e8f0; }
+section[data-testid="stSidebar"] { background: linear-gradient(180deg,#0f172a,#1e293b) !important; border-right: 1px solid rgba(99,102,241,.2); }
+h1 { font-size:1.8rem !important; font-weight:800 !important; background:linear-gradient(90deg,#6366f1,#a78bfa,#38bdf8); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+h2 { font-size:1.3rem !important; font-weight:700 !important; color:#c7d2fe !important; }
+h3 { font-size:1.1rem !important; font-weight:600 !important; color:#a5b4fc !important; }
+.stButton > button { background:linear-gradient(135deg,#4f46e5,#7c3aed) !important; color:#fff !important; font-weight:600 !important; border:none !important; border-radius:10px !important; padding:10px 22px !important; }
+.stTextInput > div > div > input, .stTextArea > div > div > textarea { background:rgba(30,41,59,.8) !important; color:#e2e8f0 !important; border:1px solid rgba(99,102,241,.3) !important; border-radius:10px !important; }
+.stSelectbox > div > div { background:rgba(30,41,59,.8) !important; color:#e2e8f0 !important; border:1px solid rgba(99,102,241,.3) !important; border-radius:10px !important; }
+.stTabs [data-baseweb="tab-list"] { background:rgba(15,23,42,.8); border-radius:12px; padding:4px; border:1px solid rgba(99,102,241,.2); }
+.stTabs [data-baseweb="tab"] { border-radius:9px !important; font-weight:600 !important; color:#94a3b8 !important; }
+.stTabs [aria-selected="true"] { background:linear-gradient(135deg,#4f46e5,#7c3aed) !important; color:#fff !important; }
+.stat-card { background:linear-gradient(135deg,rgba(30,41,59,.9),rgba(15,23,42,.9)); border:1px solid rgba(99,102,241,.25); border-radius:12px; padding:14px; text-align:center; margin:4px 0; }
+.stat-val { font-size:1.6em; font-weight:800; color:#818cf8; }
+.stat-lbl { font-size:.72rem; color:#64748b; font-weight:600; text-transform:uppercase; letter-spacing:.8px; }
+.answer-box { background:linear-gradient(135deg,rgba(30,41,59,.95),rgba(15,23,42,.95)); border:1px solid rgba(99,102,241,.3); border-left:4px solid #6366f1; border-radius:14px; padding:20px 24px; margin:12px 0; line-height:1.75; }
+.chunk-card { background:rgba(30,41,59,.6); border:1px solid rgba(99,102,241,.2); border-left:3px solid #6366f1; border-radius:8px; padding:12px 16px; margin:8px 0; font-size:.88rem; }
+.source-badge { display:inline-block; background:rgba(99,102,241,.15); border:1px solid rgba(99,102,241,.35); border-radius:20px; padding:3px 12px; font-size:.76rem; color:#a5b4fc; margin:3px 4px 3px 0; }
+.doc-card { background:linear-gradient(135deg,rgba(30,41,59,.9),rgba(15,23,42,.9)); border:1px solid rgba(99,102,241,.25); border-radius:12px; padding:14px 18px; margin:6px 0; }
+.progress-log { background:rgba(15,23,42,.9); border:1px solid rgba(99,102,241,.2); border-radius:10px; padding:12px 16px; font-size:.82rem; color:#94a3b8; font-family:monospace; max-height:180px; overflow-y:auto; }
+::-webkit-scrollbar { width:6px; } ::-webkit-scrollbar-track { background:#0f172a; } ::-webkit-scrollbar-thumb { background:rgba(99,102,241,.4); border-radius:3px; }
+</style>
+"""
+
+
 def run_rag_app():
-    """Entry point Streamlit UI — dipanggil hanya saat standalone."""
     import streamlit as st
 
     st.set_page_config(page_title="DIGIT-OPS RAG v3", page_icon="📚",
                        layout="wide", initial_sidebar_state="expanded")
     st.markdown(_CSS, unsafe_allow_html=True)
 
-    # ── Session state ─────────────────────────────────────────────────────────
+    # ── Session state ──────────────────────────────────────────────────────────
     if "rag_engine" in st.session_state:
         if not hasattr(st.session_state.rag_engine, "n_vision_chunks"):
             del st.session_state["rag_engine"]
-    if "rag_engine"     not in st.session_state:
+    if "rag_engine" not in st.session_state:
         with st.spinner("Memuat knowledge base..."):
             st.session_state.rag_engine = RAGEngine()
-    if "chat_history"   not in st.session_state:
-        st.session_state.chat_history   = []
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
     if "search_results" not in st.session_state:
         st.session_state.search_results = []
-    if "ocr_engine"     not in st.session_state:
+    if "ocr_engine" not in st.session_state:
         st.session_state.ocr_engine = OCR_ENGINE_CLAUDE
 
     rag: RAGEngine = st.session_state.rag_engine
 
-    # ── Sidebar ───────────────────────────────────────────────────────────────
+    # ── Sidebar ────────────────────────────────────────────────────────────────
     with st.sidebar:
         try:
-            st.image("https://gajiloker.com/wp-content/uploads/2024/02/"
-                     "Gaji-PT-PLN-Nusantara-Power-Services.jpg", width=250)
+            st.image("https://gajiloker.com/wp-content/uploads/2024/02/Gaji-PT-PLN-Nusantara-Power-Services.jpg", width=250)
         except Exception:
             pass
         st.markdown("## 📚 DIGIT-OPS RAG v3")
-        st.markdown("<div style='color:#64748b;font-size:.82rem;'>"
-                    "Hybrid Text + Vision OCR | Keyword Fallback</div>",
-                    unsafe_allow_html=True)
+        st.markdown("<div style='color:#64748b;font-size:.82rem;'>Hybrid Text + Vision OCR | Keyword Fallback</div>", unsafe_allow_html=True)
         st.markdown("---")
 
+        # Stats
         c1, c2 = st.columns(2)
-        c1.markdown(f'<div class="stat-card"><div class="stat-val">{rag.n_docs}</div>'
-                    f'<div class="stat-lbl">Dokumen</div></div>', unsafe_allow_html=True)
-        c2.markdown(f'<div class="stat-card"><div class="stat-val">{rag.n_chunks:,}</div>'
-                    f'<div class="stat-lbl">Chunks</div></div>', unsafe_allow_html=True)
+        c1.markdown(f'<div class="stat-card"><div class="stat-val">{rag.n_docs}</div><div class="stat-lbl">Dokumen</div></div>', unsafe_allow_html=True)
+        c2.markdown(f'<div class="stat-card"><div class="stat-val">{rag.n_chunks:,}</div><div class="stat-lbl">Chunks</div></div>', unsafe_allow_html=True)
         c3, c4 = st.columns(2)
-        c3.markdown(f'<div class="stat-card"><div class="stat-val">{rag.n_vision_chunks:,}</div>'
-                    f'<div class="stat-lbl">OCR</div></div>', unsafe_allow_html=True)
-        c4.markdown(f'<div class="stat-card">'
-                    f'<div class="stat-val">{rag.n_chunks - rag.n_vision_chunks:,}</div>'
-                    f'<div class="stat-lbl">Teks</div></div>', unsafe_allow_html=True)
-
+        c3.markdown(f'<div class="stat-card"><div class="stat-val">{rag.n_vision_chunks:,}</div><div class="stat-lbl">OCR</div></div>', unsafe_allow_html=True)
+        c4.markdown(f'<div class="stat-card"><div class="stat-val">{rag.n_chunks - rag.n_vision_chunks:,}</div><div class="stat-lbl">Teks</div></div>', unsafe_allow_html=True)
         st.markdown("---")
 
-        # ── OCR ENGINE SELECTOR ───────────────────────────────────────────────
+        # OCR Engine
         st.markdown("#### 🔬 OCR Engine")
         selected_engine = st.selectbox(
-            "Pilih engine untuk halaman gambar/tabel:",
+            "Engine untuk halaman gambar/tabel:",
             _OCR_ENGINE_OPTIONS,
             index=_OCR_ENGINE_OPTIONS.index(st.session_state.ocr_engine),
             key="sb_ocr_engine",
-            help=(
-                "Claude Vision: akurat, butuh Anthropic API key\n"
-                "Chandra HF: lokal, gratis, butuh GPU\n"
-                "Chandra API: hosted, daftar di datalab.to"
-            )
         )
         st.session_state.ocr_engine = selected_engine
 
-        # Info panel per engine
-        if selected_engine == OCR_ENGINE_CLAUDE:
-            st.markdown("""<div class="engine-card engine-claude">
-                <div style='font-size:.8rem;color:#a5b4fc;font-weight:600;'>🤖 Claude Vision</div>
-                <div style='font-size:.75rem;color:#64748b;margin-top:4px;'>
-                Akurat untuk tabel bilingual Mandarin+Inggris.<br>
-                Butuh Anthropic API key.</div></div>""", unsafe_allow_html=True)
-        elif selected_engine == OCR_ENGINE_CHANDRA_HF:
-            st.markdown("""<div class="engine-card engine-chandra">
-                <div style='font-size:.8rem;color:#f9a8d4;font-weight:600;'>🔮 Chandra OCR (Lokal)</div>
-                <div style='font-size:.75rem;color:#64748b;margin-top:4px;'>
-                Gratis, berjalan di GPU/CPU lokal.<br>
-                Install: <code>pip install chandra-ocr</code></div></div>""",
-                unsafe_allow_html=True)
-        elif selected_engine == OCR_ENGINE_CHANDRA_API:
-            st.markdown("""<div class="engine-card engine-chandra">
-                <div style='font-size:.8rem;color:#f9a8d4;font-weight:600;'>🌐 Chandra OCR (API)</div>
-                <div style='font-size:.75rem;color:#64748b;margin-top:4px;'>
-                Hosted oleh Datalab. Daftar di datalab.to.<br>
-                Masukkan Datalab API key di bawah.</div></div>""",
-                unsafe_allow_html=True)
-
-        # Tampilkan input Datalab API key hanya jika Chandra API dipilih
         if selected_engine == OCR_ENGINE_CHANDRA_API:
-            datalab_key_input = st.text_input(
-                "Datalab API Key:",
-                type="password",
-                key="datalab_api_key",
-                placeholder="dl-...",
-                help="Dapatkan API key di https://www.datalab.to/",
-            )
-
+            st.text_input("Datalab API Key:", type="password", key="datalab_api_key", placeholder="dl-...")
         st.markdown("---")
-        all_cats     = ["Semua"] + sorted(rag.categories_available)
+
+        # Supabase status
+        st.markdown("#### ☁️ Supabase Storage")
+        supa_ok = is_supabase_configured()
+        if supa_ok:
+            st.success("✅ Terhubung — index tersimpan otomatis")
+            sc1, sc2 = st.columns(2)
+            if sc1.button("⬆️ Push", key="supa_push", use_container_width=True):
+                with st.spinner("Uploading..."):
+                    ok, msg = supabase_push_index(rag.index_dir)
+                st.toast(msg)
+            if sc2.button("⬇️ Pull", key="supa_pull", use_container_width=True):
+                with st.spinner("Downloading..."):
+                    ok, msg = supabase_pull_index(rag.index_dir)
+                if ok:
+                    del st.session_state["rag_engine"]
+                    st.rerun()
+                else:
+                    st.toast(msg)
+        else:
+            st.warning("⚠️ Belum dikonfigurasi\nLihat tab 🔗 Integrasi")
+        st.markdown("---")
+
+        # Filter & mode
+        all_cats = ["Semua"] + sorted(rag.categories_available)
         selected_cat = st.selectbox("Filter Kategori:", all_cats, key="sb_cat")
         st.markdown("---")
-
-        int_mode  = st.checkbox("Mode Integrasi DIGIT-OPS", key="int_mode")
+        int_mode = st.checkbox("Mode Integrasi DIGIT-OPS", key="int_mode")
         ctx_input = ""
         if int_mode:
             ctx_input = st.text_area("Data Operasional:", height=90, key="ctx_in",
                 placeholder="Beban: 22 MW\nSteam P: 9.2 MPa\nBed Temp: 870°C")
-        st.markdown("---")
 
-        if st.button("🔄 Sync ke DIGIT-OPS", use_container_width=True):
-            info = {"rag_index_path": str(_INDEX_DIR.absolute()),
-                    "n_docs": rag.n_docs, "n_chunks": rag.n_chunks,
-                    "n_vision_chunks": rag.n_vision_chunks,
-                    "categories": rag.categories_available,
-                    "ocr_engine_default": st.session_state.ocr_engine,
-                    "sync_time": datetime.datetime.now().isoformat()}
-            with open(_INDEX_DIR / "sync_info.json", "w") as f:
-                json.dump(info, f, indent=2)
-            st.success(f"Tersimpan: {_INDEX_DIR.absolute()}/sync_info.json")
-
-    # ── Main ──────────────────────────────────────────────────────────────────
+    # ── Main ───────────────────────────────────────────────────────────────────
     st.title("📚 DIGIT-OPS RAG v3 — Manual Book Knowledge Base")
-    st.markdown("<div style='color:#64748b;margin-bottom:16px;'>"
-                "Hybrid Text + Vision OCR + Keyword Fallback — untuk tabel parameter teknis PLTU"
-                "</div>", unsafe_allow_html=True)
+    st.markdown("<div style='color:#64748b;margin-bottom:16px;'>Hybrid Text + Vision OCR + Keyword Fallback — parameter teknis PLTU</div>", unsafe_allow_html=True)
 
     tab_chat, tab_upload, tab_search, tab_docs, tab_integrate = st.tabs([
         "💬 Tanya AI", "📤 Upload Manual", "🔍 Pencarian", "📑 Dokumen", "🔗 Integrasi"
     ])
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # TAB 1 — CHAT AI
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── TAB 1: CHAT ────────────────────────────────────────────────────────────
     with tab_chat:
         if rag.n_docs == 0:
             st.info("📢 Upload manual book di tab **📤 Upload Manual** terlebih dahulu.")
 
         for msg in st.session_state.chat_history:
             if msg["role"] == "user":
-                st.markdown(
-                    f'<div style="background:rgba(99,102,241,.12);border:1px solid rgba(99,102,241,.25);'
-                    f'border-radius:12px;padding:12px 16px;margin:8px 0 4px 40px;">'
-                    f'🧑‍💼 {msg["content"]}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div style="background:rgba(99,102,241,.12);border:1px solid rgba(99,102,241,.25);border-radius:12px;padding:12px 16px;margin:8px 0 4px 40px;">🧑‍💼 {msg["content"]}</div>', unsafe_allow_html=True)
             else:
-                st.markdown(f'<div class="answer-box">🤖 {msg["content"]}</div>',
-                            unsafe_allow_html=True)
+                st.markdown(f'<div class="answer-box">🤖 {msg["content"]}</div>', unsafe_allow_html=True)
 
-        cq, cb = st.columns([5, 1])
-        with cq:
-            question = st.text_area("Tanyakan:", height=100, key="cin",
-                placeholder=("Contoh:\n"
-                             "• Berapa thrust pad temperature normal dan alarm?\n"
-                             "• Clearance bearing turbine N27.5?\n"
-                             "• Parameter normal lube oil system?"))
-        with cb:
-            st.markdown("<div style='height:36px'></div>", unsafe_allow_html=True)
-            send = st.button("Kirim ➤",  key="send",  use_container_width=True)
-            clr  = st.button("Hapus",    key="clr",   use_container_width=True)
+        question = st.text_area("Tanyakan:", height=90, key="cin",
+            placeholder="Contoh: Berapa thrust pad temperature normal dan alarm?")
+
+        col_send, col_clr = st.columns([1, 1])
+        send = col_send.button("➤ Kirim", key="send", use_container_width=True)
+        clr  = col_clr.button("🗑 Hapus Chat", key="clr", use_container_width=True)
 
         if clr:
-            st.session_state.chat_history = []; st.rerun()
+            st.session_state.chat_history = []
+            st.rerun()
 
         if send and question.strip():
             if rag.n_docs == 0:
                 st.warning("Upload dokumen dulu.")
             else:
-                st.session_state.chat_history.append(
-                    {"role": "user", "content": question.strip()})
+                st.session_state.chat_history.append({"role": "user", "content": question.strip()})
                 with st.spinner("🔍 Mencari referensi..."):
                     try: ak = st.secrets["anthropic"]["api_key"]
                     except: ak = None
                     cf  = None if selected_cat == "Semua" else selected_cat
                     ctx = ctx_input if int_mode else None
-                    ans = query_manual(question.strip(), context_data=ctx,
-                                       filter_category=cf, api_key=ak, engine=rag)
+                    ans = query_manual(question.strip(), context_data=ctx, filter_category=cf, api_key=ak, engine=rag)
                 st.session_state.chat_history.append({"role": "assistant", "content": ans})
                 st.rerun()
 
         st.markdown("---")
         st.markdown("#### 📊 Tampilkan Semua Batas Parameter")
-        st.markdown(
-            "<div style='color:#64748b;font-size:.82rem;margin-bottom:10px;'>"
-            "Klik untuk menampilkan seluruh tabel Normal / Alarm / Trip dari manual book</div>",
-            unsafe_allow_html=True)
 
-        _QUERY_BOILER = (
-            "Tunjukkan SEMUA batas parameter operasi Boiler CFB dari manual book. "
-            "Tampilkan dalam format tabel lengkap: nama parameter, nilai normal, "
-            "alarm upper, alarm lower, trip/interlock, satuan. "
-            "Cari semua halaman: bed temperature, furnace pressure, steam pressure, "
-            "steam temperature, feed water, ID fan, FD fan, PA fan, coal feeder, "
-            "drum level, flue gas, oxygen, NOx, dan semua parameter lainnya."
-        )
-        _QUERY_TURBIN = (
-            "Tunjukkan SEMUA batas parameter operasi Steam Turbine dari manual book. "
-            "Tampilkan dalam format tabel lengkap: nama parameter, nilai normal, "
-            "alarm upper, alarm lower, trip/interlock, satuan. "
-            "Cari semua halaman: thrust pad temperature, bearing temperature, "
-            "lube oil pressure, lube oil temperature, axial displacement, vibration, "
-            "steam pressure, steam temperature, exhaust pressure, speed, "
-            "scavenge oil temperature, liner temperature, dan semua parameter lainnya."
-        )
+        _QUERY_BOILER = ("Tunjukkan SEMUA batas parameter operasi Boiler CFB dari manual book. "
+            "Format tabel: nama parameter, nilai normal, alarm upper, alarm lower, trip/interlock, satuan. "
+            "Cari: bed temperature, furnace pressure, steam pressure, steam temperature, feed water, "
+            "ID fan, FD fan, PA fan, coal feeder, drum level, flue gas, oxygen, NOx, dan semua lainnya.")
+        _QUERY_TURBIN = ("Tunjukkan SEMUA batas parameter operasi Steam Turbine dari manual book. "
+            "Format tabel: nama parameter, nilai normal, alarm upper, alarm lower, trip/interlock, satuan. "
+            "Cari: thrust pad temperature, bearing temperature, lube oil pressure, lube oil temperature, "
+            "axial displacement, vibration, steam pressure, exhaust pressure, speed, dan semua lainnya.")
 
-        btn_col1, btn_col2 = st.columns(2)
-        with btn_col1:
-            st.markdown(
-                "<div style='background:linear-gradient(135deg,rgba(239,68,68,.12),rgba(249,115,22,.08));"
-                "border:1px solid rgba(239,68,68,.3);border-radius:12px;padding:14px 16px;"
-                "margin-bottom:10px;'>"
-                "<div style='font-size:.8rem;color:#fca5a5;font-weight:600;margin-bottom:4px;'>"
-                "🔥 BOILER CFB</div>"
-                "<div style='font-size:.78rem;color:#94a3b8;'>"
-                "Bed temp · Pressure · Steam · Fan · Feed water · dll</div></div>",
-                unsafe_allow_html=True)
-            if st.button("📊 Tunjukkan Batasan Parameter Boiler",
-                         key="btn_boiler", use_container_width=True):
-                st.session_state.chat_history.append(
-                    {"role": "user", "content": "📊 Tunjukkan Batasan Parameter Boiler CFB"})
-                with st.spinner("🔍 Mengumpulkan semua parameter Boiler dari manual book..."):
+        bcol1, bcol2 = st.columns(2)
+        with bcol1:
+            st.markdown("<div style='background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:12px;padding:12px 16px;margin-bottom:8px;'><div style='color:#fca5a5;font-weight:600;font-size:.85rem;'>🔥 BOILER CFB</div><div style='color:#94a3b8;font-size:.78rem;'>Bed temp · Pressure · Steam · Fan · Feed water</div></div>", unsafe_allow_html=True)
+            if st.button("📊 Parameter Boiler", key="btn_boiler", use_container_width=True):
+                st.session_state.chat_history.append({"role": "user", "content": "📊 Semua Parameter Boiler CFB"})
+                with st.spinner("Mengumpulkan..."):
                     try: ak2 = st.secrets["anthropic"]["api_key"]
                     except: ak2 = None
-                    ans = query_manual(_QUERY_BOILER, filter_category="Boiler CFB",
-                                       top_k=15, api_key=ak2, engine=rag)
+                    ans = query_manual(_QUERY_BOILER, filter_category="Boiler CFB", top_k=15, api_key=ak2, engine=rag)
                 st.session_state.chat_history.append({"role": "assistant", "content": ans})
                 st.rerun()
 
-        with btn_col2:
-            st.markdown(
-                "<div style='background:linear-gradient(135deg,rgba(99,102,241,.12),rgba(59,130,246,.08));"
-                "border:1px solid rgba(99,102,241,.3);border-radius:12px;padding:14px 16px;"
-                "margin-bottom:10px;'>"
-                "<div style='font-size:.8rem;color:#a5b4fc;font-weight:600;margin-bottom:4px;'>"
-                "⚙️ STEAM TURBINE</div>"
-                "<div style='font-size:.78rem;color:#94a3b8;'>"
-                "Thrust pad · Bearing · Lube oil · Vibration · Alignment · dll</div></div>",
-                unsafe_allow_html=True)
-            if st.button("📊 Tunjukkan Batasan Parameter Turbin",
-                         key="btn_turbin", use_container_width=True):
-                st.session_state.chat_history.append(
-                    {"role": "user", "content": "📊 Tunjukkan Batasan Parameter Steam Turbine"})
-                with st.spinner("🔍 Mengumpulkan semua parameter Turbin dari manual book..."):
+        with bcol2:
+            st.markdown("<div style='background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.3);border-radius:12px;padding:12px 16px;margin-bottom:8px;'><div style='color:#a5b4fc;font-weight:600;font-size:.85rem;'>⚙️ STEAM TURBINE</div><div style='color:#94a3b8;font-size:.78rem;'>Thrust pad · Bearing · Lube oil · Vibration</div></div>", unsafe_allow_html=True)
+            if st.button("📊 Parameter Turbin", key="btn_turbin", use_container_width=True):
+                st.session_state.chat_history.append({"role": "user", "content": "📊 Semua Parameter Steam Turbine"})
+                with st.spinner("Mengumpulkan..."):
                     try: ak2 = st.secrets["anthropic"]["api_key"]
                     except: ak2 = None
-                    ans = query_manual(_QUERY_TURBIN, filter_category="Steam Turbine",
-                                       top_k=15, api_key=ak2, engine=rag)
+                    ans = query_manual(_QUERY_TURBIN, filter_category="Steam Turbine", top_k=15, api_key=ak2, engine=rag)
                 st.session_state.chat_history.append({"role": "assistant", "content": ans})
                 st.rerun()
 
         st.markdown("---")
-        st.markdown("#### 💡 Pertanyaan Cepat — Steam Turbine")
+        st.markdown("#### 💡 Pertanyaan Cepat")
         qq = [
             "Berapa thrust pad temperature: normal, alarm, dan trip?",
-            "Berapa clearance thrust bearing dan journal bearing turbine N27.5?",
-            "Prosedur alignment coupling steam turbine ke gearbox dan generator?",
-            "Parameter normal lube oil system: tekanan, suhu, flow?",
-            "Batas vibrasi dan axial displacement yang diizinkan turbine?",
-            "Nilai trip speed overspeed turbine dan prosedur testnya?",
+            "Berapa clearance thrust bearing dan journal bearing?",
+            "Prosedur alignment coupling steam turbine?",
+            "Parameter normal lube oil: tekanan, suhu, flow?",
+            "Batas vibrasi dan axial displacement turbine?",
+            "Trip speed overspeed turbine dan prosedur test?",
         ]
-        cols_q = st.columns(3)
+        qcols = st.columns(3)
         for i, q in enumerate(qq):
-            with cols_q[i % 3]:
-                if st.button(q[:42] + "…", key=f"qq{i}", use_container_width=True, help=q):
-                    st.session_state.chat_history.append({"role": "user", "content": q})
-                    with st.spinner("Mencari..."):
-                        try: ak2 = st.secrets["anthropic"]["api_key"]
-                        except: ak2 = None
-                        st.session_state.chat_history.append(
-                            {"role": "assistant",
-                             "content": query_manual(q, api_key=ak2, engine=rag)})
-                    st.rerun()
+            if qcols[i % 3].button(q[:40] + "…", key=f"qq{i}", use_container_width=True, help=q):
+                st.session_state.chat_history.append({"role": "user", "content": q})
+                with st.spinner("Mencari..."):
+                    try: ak2 = st.secrets["anthropic"]["api_key"]
+                    except: ak2 = None
+                    st.session_state.chat_history.append({"role": "assistant", "content": query_manual(q, api_key=ak2, engine=rag)})
+                st.rerun()
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # TAB 2 — UPLOAD
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── TAB 2: UPLOAD ──────────────────────────────────────────────────────────
     with tab_upload:
         st.markdown("### 📤 Upload Manual Book")
-
-        # ── Info panel OCR engine yang aktif ──────────────────────────────────
         current_engine = st.session_state.ocr_engine
-        if current_engine == OCR_ENGINE_CLAUDE:
-            st.markdown("""
-            <div style='background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.3);
-                        border-radius:14px;padding:18px 22px;margin-bottom:18px;'>
-                <b style='color:#a5b4fc;font-size:1rem;'>🤖 Claude Vision OCR — Aktif</b><br><br>
-                <div style='display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:.85rem;'>
-                    <div style='background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.25);border-radius:8px;padding:12px;'>
-                        <b style='color:#6ee7b7;'>📝 Halaman Teks Normal</b><br>
-                        <span style='color:#94a3b8;'>PyMuPDF/pypdf — cepat, gratis</span>
-                    </div>
-                    <div style='background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.25);border-radius:8px;padding:12px;'>
-                        <b style='color:#a5b4fc;'>🖼️ Halaman Gambar/Tabel</b><br>
-                        <span style='color:#94a3b8;'>Claude Haiku Vision — baca tabel teknis bilingual</span>
-                    </div>
-                </div>
-            </div>""", unsafe_allow_html=True)
-        elif current_engine == OCR_ENGINE_CHANDRA_HF:
-            st.markdown("""
-            <div style='background:rgba(236,72,153,.08);border:1px solid rgba(236,72,153,.3);
-                        border-radius:14px;padding:18px 22px;margin-bottom:18px;'>
-                <b style='color:#f9a8d4;font-size:1rem;'>🔮 Chandra OCR Lokal (HuggingFace) — Aktif</b><br><br>
-                <div style='display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:.85rem;'>
-                    <div style='background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.25);border-radius:8px;padding:12px;'>
-                        <b style='color:#6ee7b7;'>📝 Halaman Teks Normal</b><br>
-                        <span style='color:#94a3b8;'>PyMuPDF/pypdf — cepat, gratis</span>
-                    </div>
-                    <div style='background:rgba(236,72,153,.08);border:1px solid rgba(236,72,153,.25);border-radius:8px;padding:12px;'>
-                        <b style='color:#f9a8d4;'>🖼️ Halaman Gambar/Tabel</b><br>
-                        <span style='color:#94a3b8;'>Chandra model — berjalan lokal di GPU/CPU</span>
-                    </div>
-                </div>
-                <div style='margin-top:10px;font-size:.8rem;color:#94a3b8;'>
-                ⚠️ Pastikan sudah install: <code>pip install chandra-ocr</code>
-                </div>
-            </div>""", unsafe_allow_html=True)
-        elif current_engine == OCR_ENGINE_CHANDRA_API:
-            st.markdown("""
-            <div style='background:rgba(236,72,153,.08);border:1px solid rgba(236,72,153,.3);
-                        border-radius:14px;padding:18px 22px;margin-bottom:18px;'>
-                <b style='color:#f9a8d4;font-size:1rem;'>🌐 Chandra OCR Hosted API (Datalab) — Aktif</b><br><br>
-                <div style='display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:.85rem;'>
-                    <div style='background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.25);border-radius:8px;padding:12px;'>
-                        <b style='color:#6ee7b7;'>📝 Halaman Teks Normal</b><br>
-                        <span style='color:#94a3b8;'>PyMuPDF/pypdf — cepat, gratis</span>
-                    </div>
-                    <div style='background:rgba(236,72,153,.08);border:1px solid rgba(236,72,153,.25);border-radius:8px;padding:12px;'>
-                        <b style='color:#f9a8d4;'>🖼️ Halaman Gambar/Tabel</b><br>
-                        <span style='color:#94a3b8;'>Chandra via Datalab API — akurasi tinggi</span>
-                    </div>
-                </div>
-                <div style='margin-top:10px;font-size:.8rem;color:#94a3b8;'>
-                ℹ️ Daftar & dapatkan API key di:
-                <a href="https://www.datalab.to/" target="_blank" style='color:#f9a8d4;'>datalab.to</a>
-                </div>
-            </div>""", unsafe_allow_html=True)
 
-        # ── Cek ketersediaan API key ───────────────────────────────────────────
+        # Status OCR engine
+        engine_colors = {
+            OCR_ENGINE_CLAUDE:      ("rgba(99,102,241,.1)",  "rgba(99,102,241,.3)",  "#a5b4fc", "🤖 Claude Vision OCR — Aktif"),
+            OCR_ENGINE_CHANDRA_HF:  ("rgba(236,72,153,.08)", "rgba(236,72,153,.3)",  "#f9a8d4", "🔮 Chandra OCR Lokal — Aktif"),
+            OCR_ENGINE_CHANDRA_API: ("rgba(236,72,153,.08)", "rgba(236,72,153,.3)",  "#f9a8d4", "🌐 Chandra OCR API — Aktif"),
+        }
+        bg, border, color, label = engine_colors.get(current_engine, engine_colors[OCR_ENGINE_CLAUDE])
+        st.markdown(f"<div style='background:{bg};border:1px solid {border};border-radius:12px;padding:14px 18px;margin-bottom:16px;'><b style='color:{color};'>{label}</b><br><span style='color:#64748b;font-size:.82rem;'>Halaman teks → PyMuPDF (gratis) &nbsp;|&nbsp; Halaman gambar/tabel → {current_engine}</span></div>", unsafe_allow_html=True)
+
+        # Cek API key
         ak_ok = False
         chandra_api_key_val = ""
-
         if current_engine == OCR_ENGINE_CLAUDE:
             try:
-                _ak = st.secrets["anthropic"]["api_key"]; ak_ok = bool(_ak)
-                st.success("✅ Anthropic API key tersedia — Claude Vision OCR aktif")
+                _ak = st.secrets["anthropic"]["api_key"]
+                ak_ok = bool(_ak)
+                st.success("✅ Anthropic API key tersedia")
             except Exception:
-                st.error("❌ Anthropic API key tidak ada.\n"
-                         "Set di `.streamlit/secrets.toml`:\n"
-                         "```toml\n[anthropic]\napi_key = \"sk-ant-...\"\n```")
+                st.error("❌ Anthropic API key tidak ada di Secrets")
 
         elif current_engine == OCR_ENGINE_CHANDRA_HF:
             try:
                 from chandra.model import InferenceManager
                 ak_ok = True
-                st.success("✅ Chandra OCR (chandra-ocr) terinstall — HF mode aktif")
+                st.success("✅ Chandra OCR terinstall")
             except ImportError:
-                st.warning("⚠️ Chandra OCR belum terinstall.\n"
-                           "Jalankan: `pip install chandra-ocr`\n\n"
-                           "Halaman gambar akan dilewati sementara.")
-                ak_ok = True  # tetap izinkan upload, teks pages tetap diproses
+                st.warning("⚠️ Jalankan: pip install chandra-ocr")
+                ak_ok = True
 
         elif current_engine == OCR_ENGINE_CHANDRA_API:
-            # Ambil dari sidebar input atau secrets
             try:
-                chandra_api_key_val = st.session_state.get("datalab_api_key", "") or \
-                                      st.secrets.get("datalab", {}).get("api_key", "")
+                chandra_api_key_val = st.session_state.get("datalab_api_key", "") or st.secrets.get("datalab", {}).get("api_key", "")
             except Exception:
                 chandra_api_key_val = st.session_state.get("datalab_api_key", "")
-
             if chandra_api_key_val:
                 ak_ok = True
-                st.success("✅ Datalab API key tersedia — Chandra API aktif")
+                st.success("✅ Datalab API key tersedia")
             else:
-                st.error("❌ Datalab API key tidak ditemukan.\n"
-                         "Masukkan di sidebar atau set di secrets.toml:\n"
-                         "```toml\n[datalab]\napi_key = \"dl-...\"\n```")
+                st.error("❌ Datalab API key belum diisi di sidebar")
 
+        # Upload form
         uc1, uc2 = st.columns([2, 1])
         with uc1:
             uploaded = st.file_uploader("Pilih file:", accept_multiple_files=True,
                 type=["pdf","docx","doc","txt","xlsx","xls","csv"], key="uploader")
         with uc2:
             doc_cat  = st.selectbox("Kategori:", _DOC_CATEGORIES, key="up_cat")
-            doc_desc = st.text_input("Deskripsi:", key="up_desc",
-                                     placeholder="Steam Turbine OEM Manual N27.5")
+            doc_desc = st.text_input("Deskripsi:", key="up_desc", placeholder="contoh: Steam Turbine N27.5")
 
         if uploaded and ak_ok:
             try: claude_api_key = st.secrets["anthropic"]["api_key"]
             except: claude_api_key = ""
 
-            if st.button(f"📥 Proses {len(uploaded)} File dengan {current_engine}",
-                         key="proc"):
+            if st.button(f"📥 Proses {len(uploaded)} File", key="proc", use_container_width=True):
                 for uf in uploaded:
                     fb  = uf.read()
                     ext = Path(uf.name).suffix.lower()
-                    st.markdown(f"#### 📄 {uf.name}")
+                    st.markdown(f"**📄 {uf.name}**")
 
                     if ext == ".pdf":
-                        prog  = st.progress(0)
-                        ptxt  = st.empty()
-                        logs: list[str] = []
-                        lbox  = st.empty()
+                        prog = st.progress(0)
+                        info_txt = st.empty()
+                        log_box  = st.empty()
+                        logs = []
 
-                        def _cb(pg, tot, nt, nv):
-                            prog.progress(int(pg/tot*100))
-                            ptxt.markdown(
-                                f"Hal **{pg}/{tot}** — "
-                                f'<span class="text-badge">teks:{nt}</span> '
-                                f'<span class="chandra-badge">ocr:{nv}</span>',
-                                unsafe_allow_html=True)
+                        def _cb(pg, tot, nt, nv, _e=current_engine, _p=prog, _i=info_txt, _l=log_box, _logs=logs):
+                            _p.progress(int(pg/tot*100))
+                            _i.caption(f"Halaman {pg}/{tot} — teks: {nt} | OCR: {nv}")
                             if nv > 0:
-                                logs.append(
-                                    f"✓ Hal {pg}: {current_engine} selesai")
-                            if len(logs) > 8: logs.pop(0)
-                            lbox.markdown(
-                                '<div class="progress-log">' +
-                                "<br>".join(logs[-6:]) + "</div>",
-                                unsafe_allow_html=True)
+                                _logs.append(f"✓ Hal {pg}: {_e}")
+                                if len(_logs) > 6: _logs.pop(0)
+                                _l.markdown('<div class="progress-log">' + "<br>".join(_logs) + "</div>", unsafe_allow_html=True)
 
                         with st.spinner("Processing..."):
-                            res = rag.add_pdf_hybrid(
-                                fb, uf.name, doc_cat,
+                            res = rag.add_pdf_hybrid(fb, uf.name, doc_cat,
                                 claude_api_key=claude_api_key,
                                 chandra_api_key=chandra_api_key_val,
                                 ocr_engine=current_engine,
                                 doc_description=doc_desc or "",
                                 progress_cb=_cb)
 
-                        prog.empty(); ptxt.empty(); lbox.empty()
+                        prog.empty(); info_txt.empty(); log_box.empty()
                         if res["ok"]:
                             st.success(res["message"])
-                            m1,m2,m3,m4 = st.columns(4)
-                            m1.metric("Total Chunks",   res["n_chunks"])
-                            m2.metric("Halaman Teks",   res["n_text"])
-                            m3.metric("Halaman OCR",    res["n_vision"])
-                            m4.metric("Error",          res["n_err"])
+                            m1, m2, m3, m4 = st.columns(4)
+                            m1.metric("Chunks", res["n_chunks"])
+                            m2.metric("Teks", res["n_text"])
+                            m3.metric("OCR", res["n_vision"])
+                            m4.metric("Error", res["n_err"])
                         else:
                             st.error(res["message"])
                     else:
@@ -1447,312 +1380,159 @@ def run_rag_app():
                         else:         st.error(res["message"])
                 st.rerun()
 
-        # ── Perbandingan OCR Engine ────────────────────────────────────────────
         with st.expander("📊 Perbandingan OCR Engine"):
             st.markdown("""
-| Fitur | Claude Vision | Chandra HF (Lokal) | Chandra API (Datalab) |
-|-------|--------------|--------------------|-----------------------|
-| **Biaya** | ~$0.01–0.02/100 hal | Gratis | Freemium |
-| **Kebutuhan** | Anthropic API key | GPU/CPU + install | Datalab API key |
-| **Kecepatan** | ⚡ Cepat (cloud) | 🐢 Lambat (CPU) / ⚡ Cepat (GPU) | ⚡ Cepat (cloud) |
-| **Tabel Teknis** | ✅ Sangat baik | ✅ Baik | ✅ Sangat baik |
-| **Bilingual (CN+EN)** | ✅ Excellent | ✅ 40+ bahasa | ✅ 40+ bahasa |
-| **Handwriting** | ✅ Baik | ✅ Excellent | ✅ Excellent |
-| **Offline** | ❌ Perlu internet | ✅ Bisa offline | ❌ Perlu internet |
-| **Install** | `pip install anthropic` | `pip install chandra-ocr` | `pip install requests` |
+| | Claude Vision | Chandra HF | Chandra API |
+|---|---|---|---|
+| **Biaya** | ~$0.01/100hal | Gratis | Freemium |
+| **Kebutuhan** | Anthropic key | GPU + install | Datalab key |
+| **Bilingual CN+EN** | ✅ Excellent | ✅ Baik | ✅ Baik |
+| **Offline** | ❌ | ✅ | ❌ |
 """)
 
-        with st.expander("📋 Panduan Kategori Dokumen"):
-            cat_guide = [
-                ("Boiler CFB",          "Manual operation & maintenance boiler circulating fluidized bed"),
-                ("Steam Turbine",       "Manual turbin uap, governor, trip system, blade inspection"),
-                ("Generator",           "Manual generator sinkron, proteksi, eksitasi"),
-                ("Kondenser & BOP",     "Kondenser, cooling tower, BFP, CEP, heat exchanger"),
-                ("Instrumen & Kontrol", "DCS, PLC, transmitter, kontrol valve, kalibrasi"),
-                ("Sistem Bahan Bakar",  "Coal handling, coal feeder, burner management system"),
-                ("Sistem Air & Kimia",  "Water treatment, demineralizer, chemical dosing, blowdown"),
-                ("SOP Operasi",         "Startup, normal operation, shutdown, emergency procedure"),
-                ("Maintenance",         "PM schedule, overhaul procedure, spare part guide"),
-                ("Keselamatan (K3)",    "JSA, hazard analysis, emergency response, APD"),
-                ("Standar EPRI / ASME", "Technical reports, performance standards, codes"),
-                ("Lain-lain",           "Dokumen yang tidak masuk kategori di atas"),
-            ]
-            for cat, desc in cat_guide:
-                st.markdown(f"**{cat}** — {desc}")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # TAB 3 — PENCARIAN
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── TAB 3: PENCARIAN ───────────────────────────────────────────────────────
     with tab_search:
-        st.markdown("### 🔍 Pencarian Semantik + Keyword")
+        st.markdown("### 🔍 Pencarian")
         if rag.n_docs == 0:
             st.info("Upload dokumen terlebih dahulu.")
         else:
             sc1, sc2, sc3 = st.columns([3, 1, 1])
-            with sc1: sq  = st.text_input("Query:", key="sq",
-                                           placeholder="thrust pad temperature")
-            with sc2: scat = st.selectbox("Kategori:",
-                                           ["Semua"]+sorted(rag.categories_available),
-                                           key="scat")
-            with sc3: sk   = st.slider("Hasil:", 3, 20, 8, key="sk")
+            sq   = sc1.text_input("Query:", key="sq", placeholder="thrust pad temperature")
+            scat = sc2.selectbox("Kategori:", ["Semua"] + sorted(rag.categories_available), key="scat")
+            sk   = sc3.slider("Hasil:", 3, 20, 8, key="sk")
 
-            c_sem, c_kw = st.columns(2)
-            do_sem = c_sem.button("🔍 Semantik", key="dos")
-            do_kw  = c_kw.button("🔎 Keyword Eksak", key="dok")
+            rc1, rc2 = st.columns(2)
+            do_sem = rc1.button("🔍 Semantik", key="dos", use_container_width=True)
+            do_kw  = rc2.button("🔎 Keyword Eksak", key="dok", use_container_width=True)
 
             if (do_sem or do_kw) and sq:
+                cf = None if scat == "Semua" else scat
                 with st.spinner("Mencari..."):
-                    cf = None if scat == "Semua" else scat
                     if do_kw:
-                        st.session_state.search_results = rag.keyword_search(sq, top_k=sk,
-                                                                               filter_category=cf)
+                        st.session_state.search_results = rag.keyword_search(sq, top_k=sk, filter_category=cf)
                     else:
-                        st.session_state.search_results = rag.retrieve(sq, top_k=sk,
-                                                                         filter_category=cf)
+                        st.session_state.search_results = rag.retrieve(sq, top_k=sk, filter_category=cf)
 
-            if st.session_state.search_results:
-                results = st.session_state.search_results
-                st.markdown(f"**{len(results)} hasil ditemukan:**")
+            for r in st.session_state.search_results:
+                pct = min(100, int(r["score"] * 100))
+                col = "#10b981" if pct > 70 else "#f59e0b" if pct > 45 else "#ef4444"
+                pt  = r.get("page_type", "text")
+                badge = "🤖 Claude OCR" if pt == "claude_vision" else ("🔮 Chandra OCR" if "chandra" in str(pt) else "📝 Teks")
+                st.markdown(f"""<div class="chunk-card">
+                    <div style='display:flex;justify-content:space-between;margin-bottom:6px;'>
+                        <div><span class="source-badge">📄 {r['source']}</span><span class="source-badge">Hal.{r['page']}</span><span class="source-badge">{r['category']}</span><span class="source-badge">{badge}</span></div>
+                        <div style='color:{col};font-weight:700;font-size:.78rem;'>{pct}%</div>
+                    </div>
+                    <div style='font-size:.85rem;color:#cbd5e1;white-space:pre-wrap;'>{r['text'][:500]}{'...' if len(r['text'])>500 else ''}</div>
+                </div>""", unsafe_allow_html=True)
 
-                if len(results) >= 3:
-                    import plotly.graph_objects as go
-                    fig_s = go.Figure(go.Bar(
-                        x=[f"{r['source'][:18]}|Hal.{r['page']}" for r in results],
-                        y=[min(100, int(r["score"] * 100)) for r in results],
-                        marker_color=[
-                            "#10b981" if min(100, int(r["score"]*100)) > 70 else
-                            "#f59e0b" if min(100, int(r["score"]*100)) > 45 else "#ef4444"
-                            for r in results
-                        ],
-                        text=[f"{min(100,int(r['score']*100))}%" for r in results],
-                        textposition="outside",
-                    ))
-                    fig_s.update_layout(
-                        template="plotly_dark", height=260,
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        plot_bgcolor="rgba(10,18,35,0.85)",
-                        xaxis=dict(tickangle=35, gridcolor="rgba(99,102,241,0.1)"),
-                        yaxis=dict(title="Relevansi (%)", range=[0, 115],
-                                   gridcolor="rgba(99,102,241,0.1)"),
-                        margin=dict(l=40, r=20, t=20, b=90),
-                        showlegend=False,
-                    )
-                    st.plotly_chart(fig_s, use_container_width=True)
-
-                for r in results:
-                    pct   = min(100, int(r["score"] * 100))
-                    col   = "#10b981" if pct > 70 else "#f59e0b" if pct > 45 else "#ef4444"
-                    pt    = r.get("page_type", "text")
-                    if pt == "claude_vision":
-                        badge = '<span class="vision-badge">🤖 Claude Vision</span>'
-                    elif "chandra" in str(pt):
-                        badge = '<span class="chandra-badge">🔮 Chandra OCR</span>'
-                    else:
-                        badge = '<span class="text-badge">📝 Teks</span>'
-                    st.markdown(f"""
-                    <div class="chunk-card">
-                        <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;'>
-                            <div>
-                                <span class="source-badge">📄 {r['source']}</span>
-                                <span class="source-badge">Hal. {r['page']}</span>
-                                <span class="source-badge">{r['category']}</span>
-                                {badge}
-                            </div>
-                            <div style='color:{col};font-weight:700;font-size:.78rem;'>{pct}%</div>
-                        </div>
-                        <div style='font-size:.85rem;color:#cbd5e1;line-height:1.7;white-space:pre-wrap;'>{r['text'][:600]}{'...' if len(r['text'])>600 else ''}</div>
-                    </div>""", unsafe_allow_html=True)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # TAB 4 — DOKUMEN
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── TAB 4: DOKUMEN ─────────────────────────────────────────────────────────
     with tab_docs:
         st.markdown("### 📑 Daftar Dokumen")
         if rag.n_docs == 0:
             st.info("Belum ada dokumen.")
         else:
-            c1,c2,c3,c4 = st.columns(4)
-            tc = sum(m.get("n_chars",0) for m in rag._doc_meta.values())
-            for col,(lbl,val) in zip([c1,c2,c3,c4],[
-                ("Dokumen", str(rag.n_docs)),
-                ("Total Chunks", f"{rag.n_chunks:,}"),
-                ("OCR Chunks", f"{rag.n_vision_chunks:,}"),
-                ("Chars", f"{tc//1000}K"),
-            ]):
-                col.markdown(f'<div class="stat-card"><div class="stat-val">{val}</div>'
-                              f'<div class="stat-lbl">{lbl}</div></div>',
-                              unsafe_allow_html=True)
-
-            st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-
-            cat_counts = {}
-            for m in rag._doc_meta.values():
-                cat_counts[m["category"]] = cat_counts.get(m["category"], 0) + 1
-            if len(cat_counts) > 1:
-                import plotly.express as px
-                df_cat = pd.DataFrame({
-                    "Kategori": list(cat_counts.keys()),
-                    "Dokumen":  list(cat_counts.values()),
-                }).sort_values("Dokumen", ascending=False)
-                fig_c = px.bar(df_cat, x="Kategori", y="Dokumen",
-                               template="plotly_dark", color="Dokumen",
-                               color_continuous_scale="Blues")
-                fig_c.update_layout(
-                    height=240, paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(10,18,35,0.85)",
-                    showlegend=False, coloraxis_showscale=False,
-                    margin=dict(l=40,r=20,t=10,b=60),
-                    xaxis=dict(tickangle=30, gridcolor="rgba(99,102,241,0.1)"),
-                    yaxis=dict(gridcolor="rgba(99,102,241,0.1)"),
-                )
-                st.plotly_chart(fig_c, use_container_width=True)
-
-            st.markdown("#### Daftar Dokumen")
-            # Engine badge helper
-            def _engine_badge(eng: str) -> str:
-                if eng == OCR_ENGINE_CLAUDE:
-                    return '<span class="vision-badge">🤖 Claude</span>'
-                elif "Chandra" in eng and "HF" in eng:
-                    return '<span class="chandra-badge">🔮 Chandra HF</span>'
-                elif "Chandra" in eng:
-                    return '<span class="chandra-badge">🌐 Chandra API</span>'
-                return '<span class="text-badge">📝 Teks</span>'
+            d1, d2, d3, d4 = st.columns(4)
+            tc = sum(m.get("n_chars", 0) for m in rag._doc_meta.values())
+            d1.markdown(f'<div class="stat-card"><div class="stat-val">{rag.n_docs}</div><div class="stat-lbl">Dokumen</div></div>', unsafe_allow_html=True)
+            d2.markdown(f'<div class="stat-card"><div class="stat-val">{rag.n_chunks:,}</div><div class="stat-lbl">Chunks</div></div>', unsafe_allow_html=True)
+            d3.markdown(f'<div class="stat-card"><div class="stat-val">{rag.n_vision_chunks:,}</div><div class="stat-lbl">OCR</div></div>', unsafe_allow_html=True)
+            d4.markdown(f'<div class="stat-card"><div class="stat-val">{tc//1000}K</div><div class="stat-lbl">Chars</div></div>', unsafe_allow_html=True)
+            st.markdown("")
 
             for doc_id, meta in rag._doc_meta.items():
                 nv  = meta.get("n_vision_pages", 0)
                 nt  = meta.get("n_text_pages", 0)
                 eng = meta.get("ocr_engine", OCR_ENGINE_CLAUDE)
-                vb  = (f'<span class="chandra-badge">🔮 {nv} OCR</span>' if nv > 0 else "")
                 with st.expander(f"📄 {meta['name']} — {meta['category']}"):
                     dc, db = st.columns([4, 1])
-                    with dc:
-                        st.markdown(f"""<div class="doc-card">
-                            <div style='display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;'>
-                                <span class="source-badge">{meta['category']}</span>
-                                <span class="source-badge">🗓 {meta.get('date','—')}</span>
-                                <span class="source-badge">📃 {meta.get('pages','?')} hal</span>
-                                <span class="source-badge">🧩 {meta['n_chunks']} chunks</span>
-                                <span class="text-badge">📝 {nt} teks</span>{vb}
-                                {_engine_badge(eng)}
-                            </div>
-                            <div style='font-size:.85rem;color:#64748b;'>
-                                {meta.get('description','—') or '—'}
-                            </div></div>""", unsafe_allow_html=True)
-                    with db:
-                        if st.button("🗑 Hapus", key=f"del_{doc_id}"):
-                            with st.spinner("Menghapus..."):
-                                rag.delete_document(doc_id)
-                            st.success("Dihapus."); st.rerun()
+                    dc.markdown(f"""<div class="doc-card">
+                        <div style='display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;'>
+                            <span class="source-badge">{meta['category']}</span>
+                            <span class="source-badge">🗓 {meta.get('date','—')}</span>
+                            <span class="source-badge">📃 {meta.get('pages','?')} hal</span>
+                            <span class="source-badge">🧩 {meta['n_chunks']} chunks</span>
+                            <span class="source-badge">📝 {nt} teks / 🔮 {nv} OCR</span>
+                        </div>
+                        <div style='font-size:.82rem;color:#64748b;'>{meta.get('description','—') or '—'}</div>
+                    </div>""", unsafe_allow_html=True)
+                    if db.button("🗑 Hapus", key=f"del_{doc_id}"):
+                        with st.spinner("Menghapus..."):
+                            rag.delete_document(doc_id)
+                        st.rerun()
 
             st.markdown("---")
             if st.button("📥 Export CSV", key="exp"):
-                rows = [{"doc_id":k,"nama":v["name"],"kategori":v["category"],
-                          "halaman":v.get("pages","?"),"chunks":v["n_chunks"],
-                          "ocr":v.get("n_vision_pages",0),
-                          "teks":v.get("n_text_pages",0),
-                          "ocr_engine":v.get("ocr_engine","—"),
-                          "tanggal":v.get("date","—")}
-                         for k,v in rag._doc_meta.items()]
-                st.download_button("⬇️ Download",
+                rows = [{"nama": v["name"], "kategori": v["category"],
+                         "halaman": v.get("pages","?"), "chunks": v["n_chunks"],
+                         "ocr_engine": v.get("ocr_engine","—"),
+                         "tanggal": v.get("date","—")} for v in rag._doc_meta.values()]
+                st.download_button("⬇️ Download CSV",
                     data=pd.DataFrame(rows).to_csv(index=False),
                     file_name="rag_docs.csv", mime="text/csv")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # TAB 5 — INTEGRASI
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── TAB 5: INTEGRASI ───────────────────────────────────────────────────────
     with tab_integrate:
-        st.markdown("### 🔗 Panduan Integrasi ke DIGIT-OPS")
-        st.markdown("""
-        <div style='background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);
-                    border-radius:12px;padding:18px 22px;margin-bottom:16px;'>
-            <b style='color:#6ee7b7;'>Cara integrasi:</b>
-            <ol style='color:#a7f3d0;font-size:.88rem;line-height:2;margin-top:8px;'>
-                <li>Letakkan <code>rag_manualbook_v3.py</code> di folder yang sama dengan <code>DigitOPS.py</code></li>
-                <li>Jalankan RAG app ini, upload semua manual book</li>
-                <li>Klik <b>🔄 Sync ke DIGIT-OPS</b> di sidebar</li>
-                <li>Copy snippet kode di bawah ke DigitOPS.py</li>
-            </ol>
-        </div>""", unsafe_allow_html=True)
+        st.markdown("### 🔗 Integrasi & Setup")
 
-        snippets = {
-            "Import & Inisialisasi": """
-# Setelah: import anthropic
-try:
-    from rag_manualbook_v3 import RAGEngine, query_manual
-    _RAG_AVAILABLE = True
-except ImportError:
-    _RAG_AVAILABLE = False
+        # Supabase setup guide
+        st.markdown("#### ☁️ Setup Supabase (Persistensi Database)")
+        supa_status = is_supabase_configured()
+        if supa_status:
+            st.success("✅ Supabase sudah terhubung!")
+        else:
+            st.warning("⚠️ Supabase belum dikonfigurasi — index hilang saat app restart")
 
-@st.cache_resource(show_spinner=False)
-def _load_rag():
-    if not _RAG_AVAILABLE: return None
-    try: return RAGEngine("rag_index")
-    except: return None
+        with st.expander("📋 Panduan Setup Supabase", expanded=not supa_status):
+            st.markdown("""
+**Langkah 1** — Buka [supabase.com](https://supabase.com) → login GitHub → **New project** → isi nama & password → Create
 
-_rag_engine = _load_rag()
-""",
-            "Fungsi _ask_manual_book": """
-def _ask_manual_book(question: str, context_data: str = "",
-                     filter_category: str = None) -> str:
-    if not _RAG_AVAILABLE or _rag_engine is None:
-        return "⚠️ RAG tidak tersedia."
-    if _rag_engine.n_docs == 0:
-        return "📚 Knowledge base kosong."
-    try: api_key = st.secrets["anthropic"]["api_key"]
-    except: return "❌ API key tidak ditemukan."
-    return query_manual(
-        question=question, context_data=context_data,
-        filter_category=filter_category,
-        engine=_rag_engine, api_key=api_key,
-    )
-""",
-            "secrets.toml — Semua Engine": """
-# .streamlit/secrets.toml
+**Langkah 2** — Di dashboard project → **Settings ⚙️ → API Keys** → tab **Legacy anon, service_role API keys**
+- Copy **anon public** key
 
-# Untuk Claude Vision OCR
+**Langkah 3** — Streamlit Cloud → app → **Settings → Secrets**, tambahkan:
+```toml
+[supabase]
+url = "https://PROJECT_ID.supabase.co"
+key = "eyJhbGci..."
+
 [anthropic]
 api_key = "sk-ant-..."
+```
 
-# Untuk Chandra OCR via Datalab API
-[datalab]
-api_key = "dl-..."
-""",
-        }
-
-        for title, code in snippets.items():
-            with st.expander(f"📝 {title}"):
-                st.code(code, language="python")
+**Langkah 4** — Save → Reboot app ✅
+""")
 
         st.markdown("---")
-        st.markdown("#### 🧪 Test Query")
-        tq = st.text_input("Test:", key="tq",
-                            placeholder="Berapa thrust pad temperature normal?")
-        if st.button("Jalankan Test", key="tr") and tq:
-            if rag.n_docs == 0:
-                st.warning("Upload dokumen dulu.")
-            else:
-                with st.spinner("Testing..."):
-                    try: ak_t = st.secrets["anthropic"]["api_key"]
-                    except: ak_t = None
-                    t0 = time.time()
-                    at = query_manual(tq, engine=rag, api_key=ak_t)
-                    t1 = time.time()
-                st.success(f"Response: {t1-t0:.2f}s")
-                st.markdown(f'<div class="answer-box">{at}</div>',
-                             unsafe_allow_html=True)
+        st.markdown("#### 🔌 Integrasi ke DIGIT-OPS")
+        with st.expander("📝 Snippet kode"):
+            st.code("""
+from app import RAGEngine, query_manual
+
+@st.cache_resource
+def load_rag():
+    return RAGEngine("rag_index")
+
+rag = load_rag()
+
+answer = query_manual(
+    "Berapa thrust pad temperature normal?",
+    engine=rag,
+    api_key=st.secrets["anthropic"]["api_key"]
+)
+""", language="python")
 
         st.markdown("---")
         st.markdown("#### ⚙️ Info Knowledge Base")
         st.markdown(f"""<div class="doc-card">
-            <div style='font-size:.88rem;color:#94a3b8;'>
-            📂 Path: <code style='color:#a5b4fc;'>{_INDEX_DIR.absolute()}</code><br>
-            🧩 Chunks: <b style='color:#818cf8;'>{rag.n_chunks:,}</b>
-            (📝 {rag.n_chunks-rag.n_vision_chunks:,} teks + 🔮 {rag.n_vision_chunks:,} OCR)<br>
+            <div style='font-size:.88rem;color:#94a3b8;line-height:2;'>
+            🧩 Chunks: <b style='color:#818cf8;'>{rag.n_chunks:,}</b> (📝 {rag.n_chunks-rag.n_vision_chunks:,} teks + 🔮 {rag.n_vision_chunks:,} OCR)<br>
             📚 Dokumen: <b style='color:#818cf8;'>{rag.n_docs}</b><br>
-            🔬 OCR Engine aktif: <b style='color:#f9a8d4;'>{st.session_state.ocr_engine}</b>
+            🔬 OCR Engine: <b style='color:#f9a8d4;'>{st.session_state.ocr_engine}</b><br>
+            ☁️ Supabase: <b style='color:{"#6ee7b7" if supa_status else "#f87171"};'>{"Terhubung ✅" if supa_status else "Belum dikonfigurasi ⚠️"}</b>
             </div></div>""", unsafe_allow_html=True)
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     run_rag_app()
