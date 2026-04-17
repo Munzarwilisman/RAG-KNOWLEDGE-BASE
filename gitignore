@@ -1,0 +1,11 @@
+.streamlit/secrets.toml
+rag_index/*.pkl
+rag_index/*.index
+rag_index/*.json
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
+venv/
+.venv/
+*.log
