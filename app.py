@@ -30,6 +30,34 @@ from pathlib import Path
 from io import BytesIO
 from typing import Optional, Literal
 
+# ── Konfigurasi ────────────────────────────────────────────────────────────────
+_INDEX_DIR     = Path("rag_index")
+_INDEX_DIR.mkdir(exist_ok=True)
+
+_CHUNK_SIZE    = 1400
+_CHUNK_OVERLAP = 350
+_TOP_K         = 10
+_EMBED_MODEL   = "paraphrase-multilingual-MiniLM-L12-v2"
+_IMG_THRESHOLD = 150
+_OCR_DPI       = 150
+
+OCR_ENGINE_CLAUDE      = "Claude Vision"
+OCR_ENGINE_CHANDRA_HF  = "Chandra OCR (Lokal/HF)"
+OCR_ENGINE_CHANDRA_API = "Chandra OCR (Datalab API)"
+
+_OCR_ENGINE_OPTIONS = [
+    OCR_ENGINE_CLAUDE,
+    OCR_ENGINE_CHANDRA_HF,
+    OCR_ENGINE_CHANDRA_API,
+]
+
+_DOC_CATEGORIES = [
+    "Boiler CFB", "Steam Turbine", "Generator", "Kondenser & BOP",
+    "Instrumen & Kontrol", "Sistem Bahan Bakar", "Sistem Air & Kimia",
+    "SOP Operasi", "Maintenance", "Keselamatan (K3)", "Standar EPRI / ASME", "Lain-lain",
+]
+
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SUPABASE STORAGE — Persistensi index di Streamlit Cloud
